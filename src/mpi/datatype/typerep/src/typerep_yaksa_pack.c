@@ -174,7 +174,9 @@ static int typerep_do_pack(const void *inbuf, MPI_Aint incount, MPI_Datatype dat
     if (rel_addressing && is_contig && element_size > 0 && IS_HOST(inattr) && IS_HOST(outattr)) {
         MPI_Aint real_bytes = MPL_MIN(total_size - inoffset, max_pack_bytes);
         /* Make sure we never pack partial element */
+	printf( "did we hit here? %d %d\n",real_bytes,element_size );
         real_bytes -= real_bytes % element_size;
+
         if (flags & MPIR_TYPEREP_FLAG_STREAM) {
             MPIR_Memcpy_stream(outbuf, MPIR_get_contig_ptr(inbuf_ptr, inoffset), real_bytes);
         } else {

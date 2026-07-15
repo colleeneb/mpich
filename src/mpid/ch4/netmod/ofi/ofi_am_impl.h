@@ -392,6 +392,21 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_OFI_am_isend_pipeline(int rank, MPIR_Comm * c
     }
     MPI_Aint seg_sz = MPIDI_OFI_DEFAULT_SHORT_SEND_SIZE - sizeof(MPIDI_OFI_am_header_t) - am_hdr_sz;
     seg_sz = MPL_MIN(seg_sz, MPIDIG_am_send_async_get_data_sz_left(sreq));
+
+    /* MPIR_Typerep_pack packs whole datatype elements only,
+     * so make seg_sz a multiple of the datatype extent. */
+    MPI_Aint elem_sz = 0;
+    if (HANDLE_IS_BUILTIN(datatype)) {
+      elem_sz = MPIR_Datatype_get_basic_size(datatype);
+    } else {
+      MPIR_Datatype *dtp;
+      MPIR_Datatype_get_ptr(datatype, dtp);
+      elem_sz = dtp->builtin_element_size;
+    }
+    if (elem_sz ) {
+      seg_sz -= (seg_sz % elem_sz);
+    }
+    
     MPIR_Assert(seg_sz < (1ULL << MPIDI_OFI_AM_PAYLOAD_SZ_BITS));
 
     msg_hdr = (MPIDI_OFI_am_header_t *) send_req->msg_hdr;
@@ -410,6 +425,8 @@ MPL_STATIC_INLINE_PREFIX int MPIDI_OFI_am_isend_pipeline(int rank, MPIR_Comm * c
     mpi_errno = MPIR_Typerep_pack(buf, count, datatype, offset,
                                   send_req->am_data, seg_sz, &packed_size, MPIR_TYPEREP_FLAG_NONE);
     MPIR_ERR_CHECK(mpi_errno);
+    printf("seg_sz: %d, packed_size: %d, mod: %d\n", seg_sz,packed_size, seg_sz-seg_sz%16);
+    printf("seg_sz = %d - %d -%d\n", MPIDI_OFI_DEFAULT_SHORT_SEND_SIZE, sizeof(MPIDI_OFI_am_header_t), am_hdr_sz);
     MPIR_Assert(packed_size == seg_sz);
 
     MPIDI_OFI_CALL_RETRY_AM(fi_send(MPIDI_OFI_global.ctx[ctx_idx].tx, msg_hdr, total_msg_sz,
