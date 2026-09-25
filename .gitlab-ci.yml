@@ -1,0 +1,81 @@
+include:
+  - project: 'anl/ci-resources/defaults'
+    ref: main
+    file:
+      - '/runners.yml'
+
+variables:
+  PROJ: "Performance"
+  QUEUE: "capacity"
+  TIME: "0:20:00"
+  WRK_DIR: "/lus/flare/projects/${PROJ}/mpich-ci/${CI_PIPELINE_ID}"
+  INSTALL_DIR: "${WRK_DIR}/install"
+  BATS_DIR: "${WRK_DIR}/bats-core"
+  # The deployed Aurora build's own configure line. To refresh it:
+  #   module show mpich 2>&1 | sed -n 's/.*Configure options : \(.*\)")/\1/p'
+  # The hwloc and libfabric paths are version-pinned, so this needs redoing
+  # whenever the module is updated.
+  CONFIGURE_OPTS: >-
+    --disable-maintainer-mode --disable-silent-rules --enable-shared --enable-static
+    --with-pm=no --enable-romio --without-ibverbs --enable-wrapper-rpath=yes
+    --with-yaksa=embedded --with-ze --with-ch4-shmmods=posix,gpudirect
+    --with-hwloc=/opt/aurora/26.181.0/spack/unified/1.1.1/install/linux-x86_64/hwloc-2.12.2-y56qdyp
+    --enable-fortran --with-slurm=no --with-pmi=pmix --with-pmix=/usr
+    --without-cuda --without-hip --with-device=ch4:ofi
+    --with-libfabric=/opt/cray/libfabric/2.3.1 --enable-libxml2
+    --with-datatype-engine=yaksa --with-xpmem=/usr
+    --with-file-system=daos+lustre+nfs+ufs --with-daos=/usr
+    --enable-timer-type=linux86_cycle
+    --enable-fast=O3,alwaysinline,avx,avx2,avx512f,sse2
+    --enable-g=no --disable-debuginfo --enable-error-checking=runtime
+    --without-valgrind --enable-ch4-mt=runtime --with-ze=/usr
+    --enable-ze-native=pvc --disable-opencl
+    CC=icx CXX=icpx FC=ifx F77=ifx
+
+stages:
+  - build
+  - test
+  - cleanup
+
+# Build MPICH and fetch bats. Both land in WRK_DIR on the shared filesystem,
+# so the test jobs just add them to PATH.
+build:
+  stage: build
+  extends: .aurora-shell-runner
+  script:
+    - git clone --depth 1 -b v1.11.0 https://github.com/bats-core/bats-core.git ${BATS_DIR}
+    - cd ${CI_PROJECT_DIR}
+    - ./autogen.sh
+    - ./configure --prefix=${INSTALL_DIR} ${CONFIGURE_OPTS}
+    - make -j 32
+    - make install
+
+# One job per test directory, each asking for the node count its tests need.
+.test:
+  stage: test
+  extends: .aurora-batch-runner
+  needs: [build]
+  script:
+    - export PATH="${INSTALL_DIR}/bin:${BATS_DIR}/bin:${PATH}"
+    - export LD_LIBRARY_PATH="${INSTALL_DIR}/lib:${LD_LIBRARY_PATH}"
+    - ./test/aurora/run_tests.sh ${TEST_DIR}
+
+test_1node:
+  extends: .test
+  variables:
+    TEST_DIR: "1node"
+    ANL_AURORA_SCHEDULER_PARAMETERS: "-q ${QUEUE} -l select=1,walltime=${TIME},filesystems=home:flare -A ${PROJ}"
+
+test_2node:
+  extends: .test
+  variables:
+    TEST_DIR: "2node"
+    ANL_AURORA_SCHEDULER_PARAMETERS: "-q ${QUEUE} -l select=2,walltime=${TIME},filesystems=home:flare -A ${PROJ}"
+
+# Only on success, so a failed run leaves the build and logs to look at.
+cleanup:
+  stage: cleanup
+  extends: .aurora-shell-runner
+  when: on_success
+  script:
+    - rm -rf ${WRK_DIR}
