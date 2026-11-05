@@ -1252,6 +1252,59 @@ static int pmix_deregister_event_handlers(void)
 
 #endif /* ENABLE_PMIX */
 
+#ifdef ENABLE_PMIX
+/* Fill nodemap for one node from this client's local data store, the way PMIx_Resolve_peers
+ * did before openpmix PR 3529. No round trip to the PMIx server. Returns PMIX_SUCCESS only if
+ * every rank was filled in; the caller falls back to PMIx_Resolve_peers otherwise. */
+static pmix_status_t pmix_local_peers_to_nodemap(const char *node, int node_id, int *nodemap,
+                                                 int sz)
+{
+    pmix_info_t *info;
+    PMIX_INFO_CREATE(info, 3);
+    bool flag = true;
+    PMIx_Info_load(&info[0], PMIX_OPTIONAL, &flag, PMIX_BOOL);
+    PMIx_Info_load(&info[1], PMIX_NODE_INFO, &flag, PMIX_BOOL);
+    PMIx_Info_load(&info[2], PMIX_HOSTNAME, node, PMIX_STRING);
+
+    pmix_proc_t proc = pmix_proc;
+    pmix_value_t *val = NULL;
+    proc.rank = PMIX_RANK_UNDEF;
+    pmix_status_t rc = PMIx_Get(&proc, PMIX_LOCAL_PEERS, info, 3, &val);
+    if (rc != PMIX_SUCCESS) {
+        proc.rank = PMIX_RANK_WILDCARD;
+        rc = PMIx_Get(&proc, PMIX_LOCAL_PEERS, info, 3, &val);
+    }
+    PMIX_INFO_FREE(info, 3);
+    if (rc != PMIX_SUCCESS) {
+        return rc;
+    }
+
+    if (val == NULL) {
+        return PMIX_ERR_NOT_FOUND;
+    }
+    if (val->type != PMIX_STRING || val->data.string == NULL) {
+        PMIX_VALUE_RELEASE(val);
+        return PMIX_ERR_NOT_FOUND;
+    }
+
+    char *ranks = MPL_strdup(val->data.string);
+    PMIX_VALUE_RELEASE(val);
+    char *save = NULL;
+    int count = 0;
+    for (char *tok = strtok_r(ranks, ",", &save); tok; tok = strtok_r(NULL, ",", &save)) {
+        int rank = atoi(tok);
+        if (rank < 0 || rank >= sz) {
+            MPL_free(ranks);
+            return PMIX_ERR_BAD_PARAM;
+        }
+        nodemap[rank] = node_id;
+        count++;
+    }
+    MPL_free(ranks);
+    return (count > 0) ? PMIX_SUCCESS : PMIX_ERR_NOT_FOUND;
+}
+#endif /* ENABLE_PMIX */
+
 /* build nodemap using PMIx_Resolve_nodes */
 static int pmix_build_nodemap(int *nodemap, int sz)
 {
@@ -1269,13 +1322,22 @@ static int pmix_build_nodemap(int *nodemap, int sz)
                          "**pmix_resolve_nodes", "**pmix_resolve_nodes %d", pmi_errno);
     MPIR_Assert(nodelist);
 
+    /* Off by default. Set MPIR_PMIX_USE_GET_LOCAL_PEERS=1 to try PMIx_Get(PMIX_LOCAL_PEERS) first
+     * and fall back to PMIx_Resolve_peers for any node it cannot answer. */
+    int use_local_get = 0;
+    MPL_env2int("MPIR_PMIX_USE_GET_LOCAL_PEERS", &use_local_get);
+
     node = strtok(nodelist, ",");
     while (node) {
-        pmi_errno = PMIx_Resolve_peers(node, pmix_proc.nspace, &procs, &nprocs);
-        MPIR_ERR_CHKANDJUMP1(pmi_errno != PMIX_SUCCESS, mpi_errno, MPI_ERR_OTHER,
-                             "**pmix_resolve_peers", "**pmix_resolve_peers %d", pmi_errno);
-        for (int i = 0; i < nprocs; i++) {
-            nodemap[procs[i].rank] = node_id;
+        bool resolved_by_get = use_local_get &&
+            pmix_local_peers_to_nodemap(node, node_id, nodemap, sz) == PMIX_SUCCESS;
+        if (!resolved_by_get) {
+            pmi_errno = PMIx_Resolve_peers(node, pmix_proc.nspace, &procs, &nprocs);
+            MPIR_ERR_CHKANDJUMP1(pmi_errno != PMIX_SUCCESS, mpi_errno, MPI_ERR_OTHER,
+                                 "**pmix_resolve_peers", "**pmix_resolve_peers %d", pmi_errno);
+            for (int i = 0; i < nprocs; i++) {
+                nodemap[procs[i].rank] = node_id;
+            }
         }
         node_id++;
         node = strtok(NULL, ",");
